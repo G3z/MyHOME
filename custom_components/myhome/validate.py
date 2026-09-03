@@ -177,30 +177,59 @@ class MyHomeConfigSchema(Schema):
         data = super().__call__(data)
         _rekeyed_data = {}
         for gateway in data:
-            _rekeyed_data[data[gateway][CONF_MAC]] = {}
-            _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS] = {}
-            for platform in data[gateway]:
-                if platform != CONF_MAC:
-                    _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][platform] = data[gateway][platform]
+            platforms = {}
+            for platform, devices in data[gateway].items():
+                if platform == CONF_MAC:
+                    continue
+                platforms[platform] = (
+                    devices
+                    if all(CONF_ENTITIES in device for device in devices.values())
+                    else {
+                        LIGHT: light_schema,
+                        SWITCH: switch_schema,
+                        COVER: cover_schema,
+                        BINARY_SENSOR: binary_sensor_schema,
+                        SENSOR: sensor_schema,
+                        CLIMATE: climate_schema,
+                    }[platform](devices)
+                )
+                for device in platforms[platform].values():
+                    entities = device[CONF_ENTITIES]
+                    if platform == SENSOR:
+                        if not entities:
+                            entities[str(device[CONF_DEVICE_CLASS])] = None
+                    else:
+                        entities[platform] = None
+
+            _rekeyed_data[data[gateway][CONF_MAC]] = {CONF_PLATFORMS: platforms}
 
             if (
                 (LIGHT in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS])
                 or (SWITCH in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS])
                 or (COVER in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS])
             ):
-                _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][BUTTON] = {}
+                platforms[BUTTON] = {}
                 if LIGHT in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS]:
-                    for key, value in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][LIGHT].items():
+                    for key, value in platforms[LIGHT].items():
                         if not value[CONF_WHERE].startswith("#"):
-                            _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][BUTTON][key] = value
+                            platforms[BUTTON][key] = {
+                                **value,
+                                CONF_ENTITIES: {"disable": None, "enable": None},
+                            }
                 if SWITCH in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS]:
-                    for key, value in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][SWITCH].items():
+                    for key, value in platforms[SWITCH].items():
                         if not value[CONF_WHERE].startswith("#"):
-                            _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][BUTTON][key] = value
+                            platforms[BUTTON][key] = {
+                                **value,
+                                CONF_ENTITIES: {"disable": None, "enable": None},
+                            }
                 if COVER in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS]:
-                    for key, value in _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][COVER].items():
+                    for key, value in platforms[COVER].items():
                         if not value[CONF_WHERE].startswith("#"):
-                            _rekeyed_data[data[gateway][CONF_MAC]][CONF_PLATFORMS][BUTTON][key] = value
+                            platforms[BUTTON][key] = {
+                                **value,
+                                CONF_ENTITIES: {"disable": None, "enable": None},
+                            }
 
         return _rekeyed_data
 

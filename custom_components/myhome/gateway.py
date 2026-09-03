@@ -92,12 +92,15 @@ class MyHOMEGatewayHandler:
         self.config_entry = config_entry
         self.generate_events = generate_events
         self.gateway = OWNGateway(build_info)
+        self.device_entry_id = None
         self._terminate_listener = False
         self._terminate_sender = False
         self.is_connected = False
         self.listening_worker: asyncio.tasks.Task = None
         self.sending_workers: List[asyncio.tasks.Task] = []
         self.send_buffer = asyncio.Queue()
+        self._event_session = None
+        self._command_sessions = []
 
     @property
     def mac(self) -> str:
@@ -135,7 +138,9 @@ class MyHOMEGatewayHandler:
 
         LOGGER.debug("%s Creating listening worker.", self.log_id)
 
-        _event_session = OWNEventSession(gateway=self.gateway, logger=LOGGER)
+        _event_session = self._event_session = OWNEventSession(
+            gateway=self.gateway, logger=LOGGER
+        )
         await _event_session.connect()
         self.is_connected = True
 
@@ -361,7 +366,6 @@ class MyHOMEGatewayHandler:
         self.is_connected = False
 
         LOGGER.debug("%s Destroying listening worker.", self.log_id)
-        self.listening_worker.cancel()
 
     async def sending_loop(self, worker_id: int):
         self._terminate_sender = False
@@ -373,6 +377,7 @@ class MyHOMEGatewayHandler:
         )
 
         _command_session = OWNCommandSession(gateway=self.gateway, logger=LOGGER)
+        self._command_sessions.append(_command_session)
         await _command_session.connect()
 
         while not self._terminate_sender:
@@ -394,12 +399,31 @@ class MyHOMEGatewayHandler:
             self.log_id,
             worker_id,
         )
-        self.sending_workers[worker_id].cancel()
 
     async def close_listener(self) -> bool:
         LOGGER.info("%s Closing event listener", self.log_id)
         self._terminate_sender = True
         self._terminate_listener = True
+
+        tasks = [
+            task
+            for task in [self.listening_worker, *self.sending_workers]
+            if task is not None and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if self._event_session is not None:
+            await self._event_session.close()
+            self._event_session = None
+        for session in self._command_sessions:
+            await session.close()
+        self._command_sessions.clear()
+        self.listening_worker = None
+        self.sending_workers.clear()
+        self.is_connected = False
 
         return True
 

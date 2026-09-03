@@ -13,13 +13,12 @@ from voluptuous import (
     All,
     In,
     Range,
-    IsFile,
 )
 from homeassistant.config_entries import (
     CONN_CLASS_LOCAL_PUSH,
     ConfigEntry,
     ConfigFlow,
-    OptionsFlow,
+    OptionsFlowWithReload,
 )
 from homeassistant.const import (
     CONF_FRIENDLY_NAME,
@@ -79,7 +78,7 @@ class MyhomeFlowHandler(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
-        return MyhomeOptionsFlowHandler(config_entry)
+        return MyhomeOptionsFlowHandler()
 
     def __init__(self):
         """Initialize the MyHome flow."""
@@ -371,20 +370,8 @@ class MyhomeFlowHandler(ConfigFlow, domain=DOMAIN):
         return await self.async_step_test_connection()
 
 
-class MyhomeOptionsFlowHandler(OptionsFlow):
+class MyhomeOptionsFlowHandler(OptionsFlowWithReload):
     """Handle MyHome options."""
-
-    def __init__(self, config_entry):
-        """Initialize MyHome options flow."""
-        self.config_entry = config_entry
-        self.options = dict(config_entry.options)
-        self.data = dict(config_entry.data)
-        if CONF_WORKER_COUNT not in self.options:
-            self.options[CONF_WORKER_COUNT] = 1
-        if CONF_FILE_PATH not in self.options:
-            self.options[CONF_FILE_PATH] = "/config/myhome.yaml"
-        if CONF_GENERATE_EVENTS not in self.options:
-            self.options[CONF_GENERATE_EVENTS] = False
 
     async def async_step_init(self, user_input=None):  # pylint: disable=unused-argument
         """Manage the MyHome options."""
@@ -394,30 +381,38 @@ class MyhomeOptionsFlowHandler(OptionsFlow):
         """Manage the MyHome devices options."""
 
         errors = {}
+        options = {
+            CONF_WORKER_COUNT: 1,
+            CONF_FILE_PATH: "/config/myhome.yaml",
+            CONF_GENERATE_EVENTS: False,
+            **self.config_entry.options,
+        }
+        data = dict(self.config_entry.data)
 
         if user_input is not None:
             if not os.path.isfile(user_input[CONF_FILE_PATH]):
                 errors[CONF_FILE_PATH] = "invalid_config_path"
 
-            self.options.update({CONF_WORKER_COUNT: user_input[CONF_WORKER_COUNT]})
-            self.options.update({CONF_FILE_PATH: user_input[CONF_FILE_PATH]})
-            self.options.update({CONF_GENERATE_EVENTS: user_input[CONF_GENERATE_EVENTS]})
-
-            _data_update = not (self.data[CONF_HOST] == user_input[CONF_ADDRESS] and self.data[CONF_OWN_PASSWORD] == user_input[CONF_OWN_PASSWORD])
-            self.data.update({CONF_HOST: user_input[CONF_ADDRESS]})
-            self.data.update({CONF_OWN_PASSWORD: user_input[CONF_OWN_PASSWORD]})
+            data[CONF_HOST] = user_input[CONF_ADDRESS]
+            data[CONF_OWN_PASSWORD] = user_input[CONF_OWN_PASSWORD]
 
             try:
-                self.data[CONF_HOST] = str(ipaddress.IPv4Address(self.data[CONF_HOST]))
+                data[CONF_HOST] = str(ipaddress.IPv4Address(data[CONF_HOST]))
             except ipaddress.AddressValueError:
                 errors[CONF_ADDRESS] = "invalid_ip"
 
             if not errors:
-                if _data_update:
-                    self.hass.config_entries.async_update_entry(self.config_entry, data=self.data)
-                    await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-
-                return self.async_create_entry(title="", data=self.options)
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=data
+                )
+                return self.async_create_entry(
+                    title="",
+                    data={
+                        CONF_WORKER_COUNT: user_input[CONF_WORKER_COUNT],
+                        CONF_FILE_PATH: user_input[CONF_FILE_PATH],
+                        CONF_GENERATE_EVENTS: user_input[CONF_GENERATE_EVENTS],
+                    },
+                )
 
         return self.async_show_form(
             step_id="user",
@@ -425,23 +420,23 @@ class MyhomeOptionsFlowHandler(OptionsFlow):
                 {
                     Required(
                         CONF_ADDRESS,
-                        description={"suggested_value": self.data[CONF_HOST]},
+                        description={"suggested_value": data[CONF_HOST]},
                     ): str,
                     Required(
                         CONF_OWN_PASSWORD,
-                        description={"suggested_value": self.data[CONF_PASSWORD]},
+                        description={"suggested_value": data[CONF_PASSWORD]},
                     ): str,
                     Required(
                         CONF_FILE_PATH,
-                        description={"suggested_value": self.options[CONF_FILE_PATH]},
+                        description={"suggested_value": options[CONF_FILE_PATH]},
                     ): Coerce(str),
                     Required(
                         CONF_WORKER_COUNT,
-                        description={"suggested_value": self.options[CONF_WORKER_COUNT]},
+                        description={"suggested_value": options[CONF_WORKER_COUNT]},
                     ): All(Coerce(int), Range(min=1, max=10)),
                     Required(
                         CONF_GENERATE_EVENTS,
-                        description={"suggested_value": self.options[CONF_GENERATE_EVENTS]},
+                        description={"suggested_value": options[CONF_GENERATE_EVENTS]},
                     ): bool,
                 }
             ),

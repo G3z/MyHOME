@@ -17,7 +17,6 @@ from .const import (
     CONF_PLATFORMS,
     CONF_ENTITY,
     CONF_ENTITIES,
-    CONF_GATEWAY,
     CONF_WORKER_COUNT,
     CONF_FILE_PATH,
     CONF_GENERATE_EVENTS,
@@ -28,9 +27,6 @@ from .validate import config_schema, format_mac
 from .gateway import MyHOMEGatewayHandler
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = ["light", "switch", "cover", "climate", "binary_sensor", "sensor"]
-
-
 def _coerce_str(value):
     """Coerce legacy tuple/list values (from older manual config entries) to a plain string.
 
@@ -44,7 +40,7 @@ def _coerce_str(value):
 
 async def async_setup(hass, config):
     """Set up the MyHOME component."""
-    hass.data[DOMAIN] = {}
+    hass.data.setdefault(DOMAIN, {})
 
     if DOMAIN not in config:
         return True
@@ -74,6 +70,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             _validated_config = config_schema(yaml.safe_load(await yaml_file.read()))
     except FileNotFoundError:
         LOGGER.error(f"Configartion file '{_config_file_path}' is not present!")
+        hass.data[DOMAIN].pop(entry.data[CONF_MAC], None)
         return False
 
     if entry.data[CONF_MAC] in _validated_config:
@@ -81,7 +78,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             entry.data[CONF_MAC]
         ]
     else:
+        hass.data[DOMAIN].pop(entry.data[CONF_MAC], None)
         return False
+
+    platforms = tuple(
+        hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_PLATFORMS]
+    )
 
     # Migrating the config entry's unique_id if it was not formated to the recommended hass standard
     if entry.unique_id != dr.format_mac(entry.unique_id):
@@ -90,19 +92,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         )
         LOGGER.warning("Migrating config entry unique_id to %s", entry.unique_id)
 
-    hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY] = MyHOMEGatewayHandler(
+    gateway_handler = MyHOMEGatewayHandler(
         hass=hass, config_entry=entry, generate_events=_generate_events
     )
+    hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY] = gateway_handler
 
     try:
-        tests_results = await hass.data[DOMAIN][entry.data[CONF_MAC]][
-            CONF_ENTITY
-        ].test()
+        tests_results = await gateway_handler.test()
     except OSError as ose:
-        _gateway_handler = hass.data[DOMAIN].pop(CONF_GATEWAY)
-        _host = _gateway_handler.gateway.host
+        hass.data[DOMAIN].pop(entry.data[CONF_MAC], None)
         raise ConfigEntryNotReady(
-            f"Gateway cannot be reached at {_host}, make sure its address is correct."
+            f"Gateway cannot be reached at {gateway_handler.gateway.host}, make sure its address is correct."
         ) from ose
 
     if not tests_results["Success"]:
@@ -117,7 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     data=entry.data,
                 )
             )
-        del hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY]
+        hass.data[DOMAIN].pop(entry.data[CONF_MAC], None)
         return False
 
     _command_worker_count = (
@@ -140,22 +140,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         model=_coerce_str(hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY].model),
         sw_version=_coerce_str(hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY].firmware),
     )
-
-    await hass.config_entries.async_forward_entry_setups(
-        entry, hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_PLATFORMS].keys()
-    )
-
-    hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY].listening_worker = (
-        hass.loop.create_task(
-            hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY].listening_loop()
-        )
-    )
-    for i in range(_command_worker_count):
-        hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY].sending_workers.append(
-            hass.loop.create_task(
-                hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_ENTITY].sending_loop(i)
-            )
-        )
+    gateway_handler.device_entry_id = gateway_device_entry.id
 
     # Pruning lose entities and devices from the registry
     entity_entries = er.async_entries_for_config_entry(entity_registry, entry.entry_id)
@@ -163,8 +148,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     entities_to_be_removed = []
     devices_to_be_removed = [
         device_entry.id
-        for device_entry in device_registry.devices.values()
-        if entry.entry_id in device_entry.config_entries
+        for device_entry in dr.async_entries_for_config_entry(
+            device_registry, entry.entry_id
+        )
     ]
 
     configured_entities = []
@@ -236,8 +222,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             )
             return False
 
-    hass.services.async_register(DOMAIN, "sync_time", handle_sync_time)
-
     async def handle_send_message(call):
         gateway = call.data.get(ATTR_GATEWAY, None)
         message = call.data.get(ATTR_MESSAGE, None)
@@ -277,7 +261,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             )
             return False
 
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, platforms)
+    except BaseException:
+        await hass.config_entries.async_unload_platforms(entry, platforms)
+        hass.data[DOMAIN].pop(entry.data[CONF_MAC], None)
+        raise
+
+    hass.services.async_register(DOMAIN, "sync_time", handle_sync_time)
     hass.services.async_register(DOMAIN, "send_message", handle_send_message)
+
+    gateway_handler.listening_worker = entry.async_create_background_task(
+        hass,
+        gateway_handler.listening_loop(),
+        f"{DOMAIN}-{entry.entry_id}-listener",
+    )
+    for i in range(_command_worker_count):
+        gateway_handler.sending_workers.append(
+            entry.async_create_background_task(
+                hass,
+                gateway_handler.sending_loop(i),
+                f"{DOMAIN}-{entry.entry_id}-sender-{i}",
+            )
+        )
 
     return True
 
@@ -287,13 +293,18 @@ async def async_unload_entry(hass, entry):
 
     LOGGER.info("Unloading MyHome entry.")
 
-    for platform in hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_PLATFORMS].keys():
-        await hass.config_entries.async_forward_entry_unload(entry, platform)
+    entry_data = hass.data[DOMAIN][entry.data[CONF_MAC]]
+    platforms = tuple(entry_data[CONF_PLATFORMS])
+    gateway_handler = entry_data[CONF_ENTITY]
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, platforms)
+    if not unload_ok:
+        return False
+
+    await gateway_handler.close_listener()
 
     hass.services.async_remove(DOMAIN, "sync_time")
     hass.services.async_remove(DOMAIN, "send_message")
 
-    gateway_handler = hass.data[DOMAIN][entry.data[CONF_MAC]].pop(CONF_ENTITY)
     del hass.data[DOMAIN][entry.data[CONF_MAC]]
 
-    return await gateway_handler.close_listener()
+    return True
